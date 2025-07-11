@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Config File Diff Tool
+Config File Matrix Tool
 
-Compares two configuration files and reports differences to an Excel file.
-Ignores comments, empty lines, and hostname variations.
+Processes configuration files organized in hostname-based folders and creates
+a matrix-style Excel report showing configuration values across different hostnames.
 """
 
 import argparse
 import re
 import sys
 import pandas as pd
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, List, Optional, Set
 from pathlib import Path
+import glob
+import os
 
 
 def parse_config_file(file_path: str) -> Dict[str, str]:
@@ -44,155 +46,136 @@ def parse_config_file(file_path: str) -> Dict[str, str]:
                     
     except FileNotFoundError:
         print(f"Error: File '{file_path}' not found.")
-        sys.exit(1)
+        return {}
     except Exception as e:
         print(f"Error reading file '{file_path}': {e}")
-        sys.exit(1)
+        return {}
         
     return config_dict
 
 
-def normalize_hostname(value: str) -> str:
+def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
     """
-    Normalize hostname by replacing numeric suffixes with a placeholder.
-    
-    This helps identify when the only difference is hostname numbering.
-    Examples:
-        apesap-h-koc-1 -> apesap-h-koc-X
-        apesap-h-top-2 -> apesap-h-top-X
-    """
-    # Pattern to match hostname with numeric suffix
-    hostname_pattern = r'([a-zA-Z]+-[a-zA-Z]+-[a-zA-Z]+-)\d+$'
-    match = re.match(hostname_pattern, value)
-    
-    if match:
-        return match.group(1) + 'X'
-    
-    return value
-
-
-def is_hostname_only_difference(value1: str, value2: str) -> bool:
-    """
-    Check if the only difference between two values is the hostname numbering.
+    Find all configuration files in the hostname-based folder structure.
     
     Args:
-        value1: First value to compare
-        value2: Second value to compare
+        base_path: Base path containing server type folders
         
     Returns:
-        True if only difference is hostname numbering, False otherwise
+        Dictionary mapping hostname to dict of {filename: filepath}
     """
-    normalized1 = normalize_hostname(value1)
-    normalized2 = normalize_hostname(value2)
+    hostname_files = {}
     
-    return normalized1 == normalized2 and value1 != value2
-
-
-def compare_configs(config1: Dict[str, str], config2: Dict[str, str]) -> List[Dict[str, str]]:
-    """
-    Compare two configuration dictionaries and find differences.
+    # Look for folders in the pattern SERVER_TYPE/hostname
+    pattern = os.path.join(base_path, "*", "*")
+    folders = glob.glob(pattern)
     
-    Args:
-        config1: First configuration dictionary
-        config2: Second configuration dictionary
-        
-    Returns:
-        List of dictionaries representing differences
-    """
-    differences = []
-    
-    # Get all unique keys from both configs
-    all_keys = set(config1.keys()) | set(config2.keys())
-    
-    for key in sorted(all_keys):
-        value1 = config1.get(key, '<MISSING>')
-        value2 = config2.get(key, '<MISSING>')
-        
-        # If values are different
-        if value1 != value2:
-            # Check if it's only a hostname difference
-            if value1 != '<MISSING>' and value2 != '<MISSING>':
-                if is_hostname_only_difference(value1, value2):
-                    continue  # Skip hostname-only differences
+    for folder_path in folders:
+        if os.path.isdir(folder_path):
+            # Extract hostname from path (last part)
+            hostname = os.path.basename(folder_path)
+            server_type = os.path.basename(os.path.dirname(folder_path))
             
-            # Record the difference
-            differences.append({
-                'Key': key,
-                'File1_Value': value1,
-                'File2_Value': value2,
-                'Difference_Type': get_difference_type(value1, value2)
-            })
+            # Find all .conf files in this hostname folder
+            conf_files = glob.glob(os.path.join(folder_path, "*.conf"))
+            
+            if conf_files:
+                if hostname not in hostname_files:
+                    hostname_files[hostname] = {}
+                
+                for conf_file in conf_files:
+                    filename = os.path.basename(conf_file)
+                    hostname_files[hostname][filename] = conf_file
     
-    return differences
+    return hostname_files
 
 
-def get_difference_type(value1: str, value2: str) -> str:
+def create_matrix_data(hostname_files: Dict[str, Dict[str, str]]) -> pd.DataFrame:
     """
-    Determine the type of difference between two values.
+    Create matrix data with filenames as rows and hostnames as columns.
     
     Args:
-        value1: First value
-        value2: Second value
+        hostname_files: Dictionary mapping hostname to {filename: filepath}
         
     Returns:
-        String describing the type of difference
+        DataFrame with matrix structure
     """
-    if value1 == '<MISSING>':
-        return 'Missing in File1'
-    elif value2 == '<MISSING>':
-        return 'Missing in File2'
-    else:
-        return 'Value Changed'
+    # Get all unique filenames across all hostnames
+    all_filenames = set()
+    all_hostnames = list(hostname_files.keys())
+    
+    for hostname_data in hostname_files.values():
+        all_filenames.update(hostname_data.keys())
+    
+    all_filenames = sorted(list(all_filenames))
+    all_hostnames = sorted(all_hostnames)
+    
+    # Create matrix structure
+    matrix_data = []
+    
+    for filename in all_filenames:
+        # Get all config keys from this filename across all hostnames
+        all_keys = set()
+        hostname_configs = {}
+        
+        for hostname in all_hostnames:
+            if hostname in hostname_files and filename in hostname_files[hostname]:
+                config = parse_config_file(hostname_files[hostname][filename])
+                hostname_configs[hostname] = config
+                all_keys.update(config.keys())
+        
+        # Create rows for each config key in this file
+        for key in sorted(all_keys):
+            row = {'File': filename, 'Config_Key': key}
+            
+            for hostname in all_hostnames:
+                if hostname in hostname_configs and key in hostname_configs[hostname]:
+                    row[hostname] = hostname_configs[hostname][key]
+                else:
+                    row[hostname] = ''
+            
+            matrix_data.append(row)
+    
+    return pd.DataFrame(matrix_data)
 
 
-def write_to_excel(differences: List[Dict[str, str]], file1_path: str, file2_path: str, output_path: str):
+def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_files: Dict[str, Dict[str, str]]):
     """
-    Write differences to an Excel file.
+    Write matrix data to an Excel file with proper formatting.
     
     Args:
-        differences: List of difference dictionaries
-        file1_path: Path to first file
-        file2_path: Path to second file
+        matrix_df: DataFrame containing the matrix data
         output_path: Path for output Excel file
+        hostname_files: Original hostname files mapping for summary
     """
     try:
-        # Create DataFrame
-        df = pd.DataFrame(differences)
-        
         # Create Excel writer
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Write differences to main sheet
-            df.to_excel(writer, sheet_name='Differences', index=False)
+            # Write matrix to main sheet
+            matrix_df.to_excel(writer, sheet_name='Config_Matrix', index=False)
             
             # Create summary sheet
-            summary_data = {
-                'Metric': [
-                    'File 1 Path',
-                    'File 2 Path',
-                    'Total Differences',
-                    'Missing in File 1',
-                    'Missing in File 2',
-                    'Value Changes'
-                ],
-                'Value': [
-                    file1_path,
-                    file2_path,
-                    len(differences),
-                    len([d for d in differences if d['Difference_Type'] == 'Missing in File1']),
-                    len([d for d in differences if d['Difference_Type'] == 'Missing in File2']),
-                    len([d for d in differences if d['Difference_Type'] == 'Value Changed'])
-                ]
-            }
+            summary_data = []
+            summary_data.append(['Metric', 'Value'])
+            summary_data.append(['Total Hostnames', len(hostname_files)])
+            summary_data.append(['Total Unique Files', len(matrix_df['File'].unique()) if not matrix_df.empty else 0])
+            summary_data.append(['Total Config Keys', len(matrix_df) if not matrix_df.empty else 0])
+            summary_data.append(['', ''])
+            summary_data.append(['Hostnames Found:', ''])
+            
+            for hostname in sorted(hostname_files.keys()):
+                summary_data.append([f'  {hostname}', f"{len(hostname_files[hostname])} files"])
             
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False, header=False)
             
             # Format the sheets
             workbook = writer.book
             
-            # Format Differences sheet
-            if 'Differences' in workbook.sheetnames:
-                worksheet = workbook['Differences']
+            # Format Config_Matrix sheet
+            if 'Config_Matrix' in workbook.sheetnames:
+                worksheet = workbook['Config_Matrix']
+                
                 # Auto-adjust column widths
                 for column in worksheet.columns:
                     max_length = 0
@@ -205,6 +188,9 @@ def write_to_excel(differences: List[Dict[str, str]], file1_path: str, file2_pat
                             pass
                     adjusted_width = min(max_length + 2, 50)
                     worksheet.column_dimensions[column_letter].width = adjusted_width
+                
+                # Freeze the first two columns (File and Config_Key)
+                worksheet.freeze_panes = worksheet['C2']
             
             # Format Summary sheet
             if 'Summary' in workbook.sheetnames:
@@ -221,8 +207,8 @@ def write_to_excel(differences: List[Dict[str, str]], file1_path: str, file2_pat
                     adjusted_width = min(max_length + 2, 50)
                     worksheet.column_dimensions[column_letter].width = adjusted_width
         
-        print(f"Excel report generated: {output_path}")
-        print(f"Total differences found: {len(differences)}")
+        print(f"Excel matrix report generated: {output_path}")
+        print(f"Matrix contains {len(matrix_df)} configuration entries across {len(hostname_files)} hostnames")
         
     except Exception as e:
         print(f"Error writing to Excel file: {e}")
@@ -230,76 +216,81 @@ def write_to_excel(differences: List[Dict[str, str]], file1_path: str, file2_pat
 
 
 def main():
-    """Main function to run the config diff tool."""
+    """Main function to run the config matrix tool."""
     parser = argparse.ArgumentParser(
-        description="Compare two configuration files and report differences to Excel",
+        description="Create a matrix view of configuration files organized by hostname folders",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python config_diff_tool.py file1.conf file2.conf
-  python config_diff_tool.py file1.conf file2.conf -o differences.xlsx
+  python config_diff_tool.py /path/to/configs
+  python config_diff_tool.py /path/to/configs -o config_matrix.xlsx
   
+Expected folder structure:
+  base_path/
+    ├── APP/
+    │   ├── hostname1/
+    │   │   ├── config1.conf
+    │   │   └── config2.conf
+    │   └── hostname2/
+    │       ├── config1.conf
+    │       └── config2.conf
+    └── DB/
+        ├── hostname1/
+        │   └── db.conf
+        └── hostname2/
+            └── db.conf
+
 The tool will:
-- Parse key=value pairs from each line
+- Parse key=value pairs from each .conf file
 - Ignore lines starting with # or space
-- Ignore hostname-only differences (e.g., server-1 vs server-2)
-- Generate an Excel report with differences and summary
+- Create a matrix with hostnames as columns and config keys as rows
+- Show filename in the leftmost column
         """
     )
     
-    parser.add_argument('file1', help='Path to first configuration file')
-    parser.add_argument('file2', help='Path to second configuration file')
-    parser.add_argument('-o', '--output', default='config_differences.xlsx',
-                       help='Output Excel file path (default: config_differences.xlsx)')
+    parser.add_argument('base_path', help='Base path containing hostname folders')
+    parser.add_argument('-o', '--output', default='config_matrix.xlsx',
+                       help='Output Excel file path (default: config_matrix.xlsx)')
     
     args = parser.parse_args()
     
-    # Validate input files exist
-    if not Path(args.file1).exists():
-        print(f"Error: File '{args.file1}' does not exist.")
+    # Validate base path exists
+    if not Path(args.base_path).exists():
+        print(f"Error: Path '{args.base_path}' does not exist.")
         sys.exit(1)
     
-    if not Path(args.file2).exists():
-        print(f"Error: File '{args.file2}' does not exist.")
+    print(f"Scanning for configuration files in: {args.base_path}")
+    print()
+    
+    # Find all config files organized by hostname
+    hostname_files = find_config_files(args.base_path)
+    
+    if not hostname_files:
+        print("No configuration files found in the expected folder structure.")
+        print("Expected structure: SERVER_TYPE/hostname/*.conf")
         sys.exit(1)
     
-    print(f"Comparing files:")
-    print(f"  File 1: {args.file1}")
-    print(f"  File 2: {args.file2}")
+    print(f"Found configuration files for {len(hostname_files)} hostnames:")
+    for hostname, files in hostname_files.items():
+        print(f"  {hostname}: {len(files)} files")
     print()
     
-    # Parse configuration files
-    print("Parsing configuration files...")
-    config1 = parse_config_file(args.file1)
-    config2 = parse_config_file(args.file2)
+    # Create matrix data
+    print("Creating configuration matrix...")
+    matrix_df = create_matrix_data(hostname_files)
     
-    print(f"File 1: {len(config1)} key-value pairs found")
-    print(f"File 2: {len(config2)} key-value pairs found")
-    print()
+    if matrix_df.empty:
+        print("No configuration data found to process.")
+        sys.exit(1)
     
-    # Compare configurations
-    print("Comparing configurations...")
-    differences = compare_configs(config1, config2)
+    # Write to Excel
+    write_matrix_to_excel(matrix_df, args.output, hostname_files)
     
-    if differences:
-        print(f"Found {len(differences)} differences (excluding hostname-only changes)")
-        
-        # Write to Excel
-        write_to_excel(differences, args.file1, args.file2, args.output)
-        
-        # Print summary
-        print("\nDifference Summary:")
-        for diff in differences[:10]:  # Show first 10 differences
-            print(f"  {diff['Key']}: '{diff['File1_Value']}' -> '{diff['File2_Value']}'")
-        
-        if len(differences) > 10:
-            print(f"  ... and {len(differences) - 10} more differences (see Excel file)")
-            
-    else:
-        print("No significant differences found (ignoring hostname variations)")
-        
-        # Still create Excel file with empty results
-        write_to_excel([], args.file1, args.file2, args.output)
+    # Print summary
+    print(f"\nProcessing Summary:")
+    print(f"  Hostnames processed: {len(hostname_files)}")
+    print(f"  Unique files found: {len(matrix_df['File'].unique())}")
+    print(f"  Total config entries: {len(matrix_df)}")
 
 
 if __name__ == "__main__":
