@@ -176,6 +176,13 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
     """
     hostname_files = {}
     
+    # Directories to exclude from scanning (common non-hostname directories)
+    excluded_dirs = {
+        'node_modules', '.git', '__pycache__', '.venv', 'venv', 
+        'env', '.env', 'build', 'dist', 'target', 'logs', 'log',
+        'tmp', 'temp', '.cache', 'cache'
+    }
+    
     # Look for folders in the pattern SERVER_TYPE/hostname
     pattern = os.path.join(base_path, "*", "*")
     folders = glob.glob(pattern)
@@ -185,6 +192,10 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
             # Extract hostname from path (last part)
             hostname = os.path.basename(folder_path)
             server_type = os.path.basename(os.path.dirname(folder_path))
+            
+            # Skip excluded directories
+            if server_type in excluded_dirs or hostname in excluded_dirs:
+                continue
             
             # Find all .conf files in this hostname folder
             conf_files = glob.glob(os.path.join(folder_path, "*.conf"))
