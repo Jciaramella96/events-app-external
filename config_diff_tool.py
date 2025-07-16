@@ -4,13 +4,14 @@ Config File Matrix Tool
 
 Processes configuration files organized in hostname-based folders and creates
 a matrix-style Excel report showing configuration values across different hostnames.
+Includes hostname intelligence to identify when differences are only due to hostname numbering.
 """
 
 import argparse
 import re
 import sys
 import pandas as pd
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import glob
 import os
@@ -54,6 +55,115 @@ def parse_config_file(file_path: str) -> Dict[str, str]:
     return config_dict
 
 
+def normalize_hostname(value: str) -> str:
+    """
+    Normalize hostname by replacing numeric suffixes with a placeholder.
+    
+    This helps identify when the only difference is hostname numbering.
+    Examples:
+        apesap-h-koc-1 -> apesap-h-koc-X
+        apesap-h-top-2 -> apesap-h-top-X
+        server-web-01 -> server-web-X
+        db-cluster-03 -> db-cluster-X
+    """
+    # Pattern to match hostname with numeric suffix (more flexible patterns)
+    patterns = [
+        r'([a-zA-Z]+-[a-zA-Z]+-[a-zA-Z]+-)\d+$',  # Original pattern: word-word-word-number
+        r'([a-zA-Z]+-[a-zA-Z]+-)\d+$',            # word-word-number
+        r'([a-zA-Z]+)\d+$',                       # word+number
+        r'([a-zA-Z]+-[a-zA-Z]+-[a-zA-Z]+-[a-zA-Z]+-)\d+$'  # word-word-word-word-number
+    ]
+    
+    for pattern in patterns:
+        match = re.match(pattern, value)
+        if match:
+            return match.group(1) + 'X'
+    
+    return value
+
+
+def is_hostname_only_difference(value1: str, value2: str) -> bool:
+    """
+    Check if the only difference between two values is the hostname numbering.
+    
+    Args:
+        value1: First value to compare
+        value2: Second value to compare
+        
+    Returns:
+        True if only difference is hostname numbering, False otherwise
+    """
+    if value1 == value2:
+        return False
+        
+    normalized1 = normalize_hostname(value1)
+    normalized2 = normalize_hostname(value2)
+    
+    return normalized1 == normalized2 and value1 != value2
+
+
+def analyze_hostname_differences(hostname_configs: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Analyze configurations across hostnames to identify hostname-only differences.
+    
+    Args:
+        hostname_configs: Dictionary mapping hostname to config dict
+        
+    Returns:
+        Dictionary with analysis results: {
+            'hostname_only_differences': {config_key: [list of hostnames with differences]},
+            'significant_differences': {config_key: [list of hostnames with differences]}
+        }
+    """
+    result = {
+        'hostname_only_differences': {},
+        'significant_differences': {}
+    }
+    
+    if len(hostname_configs) < 2:
+        return result
+    
+    # Get all config keys
+    all_keys = set()
+    for config in hostname_configs.values():
+        all_keys.update(config.keys())
+    
+    hostnames = list(hostname_configs.keys())
+    
+    for key in all_keys:
+        # Get all values for this key across hostnames
+        values = {}
+        for hostname in hostnames:
+            if hostname in hostname_configs and key in hostname_configs[hostname]:
+                values[hostname] = hostname_configs[hostname][key]
+        
+        if len(values) < 2:
+            continue
+            
+        # Check if all differences are hostname-only
+        hostname_only = True
+        significant_diff = False
+        
+        hostnames_with_values = list(values.keys())
+        for i in range(len(hostnames_with_values)):
+            for j in range(i + 1, len(hostnames_with_values)):
+                host1, host2 = hostnames_with_values[i], hostnames_with_values[j]
+                val1, val2 = values[host1], values[host2]
+                
+                if val1 != val2:
+                    significant_diff = True
+                    if not is_hostname_only_difference(val1, val2):
+                        hostname_only = False
+        
+        if significant_diff:
+            if hostname_only:
+                result['hostname_only_differences'][key] = hostnames_with_values
+            else:
+                result['significant_differences'][key] = hostnames_with_values
+    
+    return result
+
+
 def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
     """
     Find all configuration files in the hostname-based folder structure.
@@ -90,15 +200,16 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
     return hostname_files
 
 
-def create_matrix_data(hostname_files: Dict[str, Dict[str, str]]) -> pd.DataFrame:
+def create_matrix_data(hostname_files: Dict[str, Dict[str, str]], enable_hostname_intelligence: bool = True) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
     Create matrix data with filenames as rows and hostnames as columns.
     
     Args:
         hostname_files: Dictionary mapping hostname to {filename: filepath}
+        enable_hostname_intelligence: Whether to enable hostname intelligence analysis
         
     Returns:
-        DataFrame with matrix structure
+        Tuple of (DataFrame with matrix structure, Dictionary with hostname analysis)
     """
     # Get all unique filenames across all hostnames
     all_filenames = set()
@@ -112,6 +223,7 @@ def create_matrix_data(hostname_files: Dict[str, Dict[str, str]]) -> pd.DataFram
     
     # Create matrix structure
     matrix_data = []
+    hostname_analysis = {}
     
     for filename in all_filenames:
         # Get all config keys from this filename across all hostnames
@@ -124,9 +236,27 @@ def create_matrix_data(hostname_files: Dict[str, Dict[str, str]]) -> pd.DataFram
                 hostname_configs[hostname] = config
                 all_keys.update(config.keys())
         
+        # Analyze hostname differences for this file (if enabled)
+        if enable_hostname_intelligence:
+            file_analysis = analyze_hostname_differences(hostname_configs)
+        else:
+            file_analysis = {'hostname_only_differences': {}, 'significant_differences': {}}
+        
         # Create rows for each config key in this file
         for key in sorted(all_keys):
             row = {'File': filename, 'Config_Key': key}
+            
+            # Determine if this config key has hostname-only differences (if enabled)
+            if enable_hostname_intelligence:
+                difference_type = ''
+                if key in file_analysis['hostname_only_differences']:
+                    difference_type = 'Hostname-Only'
+                elif key in file_analysis['significant_differences']:
+                    difference_type = 'Significant'
+                else:
+                    difference_type = 'Same'
+                
+                row['Difference_Type'] = difference_type
             
             for hostname in all_hostnames:
                 if hostname in hostname_configs and key in hostname_configs[hostname]:
@@ -135,18 +265,24 @@ def create_matrix_data(hostname_files: Dict[str, Dict[str, str]]) -> pd.DataFram
                     row[hostname] = ''
             
             matrix_data.append(row)
+            
+            # Store analysis for summary (if enabled)
+            if enable_hostname_intelligence:
+                full_key = f"{filename}:{key}"
+                hostname_analysis[full_key] = difference_type
     
-    return pd.DataFrame(matrix_data)
+    return pd.DataFrame(matrix_data), hostname_analysis
 
 
-def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_files: Dict[str, Dict[str, str]]):
+def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_files: Dict[str, Dict[str, str]], hostname_analysis: Dict[str, str]):
     """
-    Write matrix data to an Excel file with proper formatting.
+    Write matrix data to an Excel file with proper formatting and hostname intelligence.
     
     Args:
         matrix_df: DataFrame containing the matrix data
         output_path: Path for output Excel file
         hostname_files: Original hostname files mapping for summary
+        hostname_analysis: Dictionary with hostname difference analysis
     """
     try:
         # Create Excel writer
@@ -161,6 +297,19 @@ def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_fi
             summary_data.append(['Total Unique Files', len(matrix_df['File'].unique()) if not matrix_df.empty else 0])
             summary_data.append(['Total Config Keys', len(matrix_df) if not matrix_df.empty else 0])
             summary_data.append(['', ''])
+            
+            # Add hostname intelligence analysis
+            if hostname_analysis:
+                hostname_only_count = sum(1 for v in hostname_analysis.values() if v == 'Hostname-Only')
+                significant_count = sum(1 for v in hostname_analysis.values() if v == 'Significant')
+                same_count = sum(1 for v in hostname_analysis.values() if v == 'Same')
+                
+                summary_data.append(['Hostname Intelligence Analysis:', ''])
+                summary_data.append(['  Same across hostnames', same_count])
+                summary_data.append(['  Hostname-only differences', hostname_only_count])
+                summary_data.append(['  Significant differences', significant_count])
+                summary_data.append(['', ''])
+            
             summary_data.append(['Hostnames Found:', ''])
             
             for hostname in sorted(hostname_files.keys()):
@@ -189,8 +338,28 @@ def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_fi
                     adjusted_width = min(max_length + 2, 50)
                     worksheet.column_dimensions[column_letter].width = adjusted_width
                 
-                # Freeze the first two columns (File and Config_Key)
-                worksheet.freeze_panes = worksheet['C2']
+                # Add conditional formatting for hostname intelligence
+                from openpyxl.styles import PatternFill
+                hostname_only_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")  # Light yellow
+                significant_fill = PatternFill(start_color="FFE6E6", end_color="FFE6E6", fill_type="solid")   # Light red
+                
+                # Apply formatting based on Difference_Type column
+                if 'Difference_Type' in matrix_df.columns:
+                    diff_type_col = matrix_df.columns.get_loc('Difference_Type') + 1  # +1 for Excel 1-indexing
+                    
+                    for row_idx in range(2, len(matrix_df) + 2):  # Skip header row
+                        cell_value = worksheet.cell(row=row_idx, column=diff_type_col).value
+                        if cell_value == 'Hostname-Only':
+                            # Highlight the entire row with light yellow
+                            for col_idx in range(1, worksheet.max_column + 1):
+                                worksheet.cell(row=row_idx, column=col_idx).fill = hostname_only_fill
+                        elif cell_value == 'Significant':
+                            # Highlight the entire row with light red
+                            for col_idx in range(1, worksheet.max_column + 1):
+                                worksheet.cell(row=row_idx, column=col_idx).fill = significant_fill
+                
+                # Freeze the first three columns (File, Config_Key, Difference_Type)
+                worksheet.freeze_panes = worksheet['D2']
             
             # Format Summary sheet
             if 'Summary' in workbook.sheetnames:
@@ -251,6 +420,8 @@ The tool will:
     parser.add_argument('base_path', help='Base path containing hostname folders')
     parser.add_argument('-o', '--output', default='config_matrix.xlsx',
                        help='Output Excel file path (default: config_matrix.xlsx)')
+    parser.add_argument('--disable-hostname-intelligence', action='store_true',
+                       help='Disable hostname intelligence analysis and highlighting')
     
     args = parser.parse_args()
     
@@ -276,21 +447,40 @@ The tool will:
     print()
     
     # Create matrix data
-    print("Creating configuration matrix...")
-    matrix_df = create_matrix_data(hostname_files)
+    enable_hostname_intelligence = not args.disable_hostname_intelligence
+    if enable_hostname_intelligence:
+        print("Creating configuration matrix with hostname intelligence...")
+    else:
+        print("Creating configuration matrix...")
+    matrix_df, hostname_analysis = create_matrix_data(hostname_files, enable_hostname_intelligence)
     
     if matrix_df.empty:
         print("No configuration data found to process.")
         sys.exit(1)
     
     # Write to Excel
-    write_matrix_to_excel(matrix_df, args.output, hostname_files)
+    write_matrix_to_excel(matrix_df, args.output, hostname_files, hostname_analysis)
     
     # Print summary
     print(f"\nProcessing Summary:")
     print(f"  Hostnames processed: {len(hostname_files)}")
     print(f"  Unique files found: {len(matrix_df['File'].unique())}")
     print(f"  Total config entries: {len(matrix_df)}")
+    
+    # Print hostname intelligence summary
+    if hostname_analysis:
+        hostname_only_count = sum(1 for v in hostname_analysis.values() if v == 'Hostname-Only')
+        significant_count = sum(1 for v in hostname_analysis.values() if v == 'Significant')
+        same_count = sum(1 for v in hostname_analysis.values() if v == 'Same')
+        
+        print(f"\nHostname Intelligence Analysis:")
+        print(f"  Same across hostnames: {same_count}")
+        print(f"  Hostname-only differences: {hostname_only_count}")
+        print(f"  Significant differences: {significant_count}")
+        
+        if hostname_only_count > 0:
+            print(f"\nNote: {hostname_only_count} configuration entries differ only by hostname numbering.")
+            print("These are highlighted in yellow in the Excel output.")
 
 
 if __name__ == "__main__":
