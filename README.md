@@ -5,10 +5,14 @@ A Python tool to process configuration files organized in hostname-based folders
 ## Features
 
 - **Hostname-Based Organization**: Processes files in `SERVER_TYPE/hostname/` folder structure
+- **Multiple File Types**: Supports `.conf`, `.rc` (key=value format), and `.xml` files
+- **Subdirectory Search**: Recursively searches subdirectories like `data_explorer/`, `rc/`, `site/`
 - **Matrix View**: Creates Excel output with hostnames as columns and configuration keys as rows
-- **File Tracking**: Shows source filename in the leftmost column
-- **Key-Value Parsing**: Extracts key-value pairs from lines split by "=" character
-- **Comment Filtering**: Ignores lines starting with "#" or space
+- **File Tracking**: Shows relative file path in the leftmost column
+- **Smart Parsing**: 
+  - Key-value parsing for `.conf` and `.rc` files (extracts key=value pairs)
+  - XML parsing with dot notation flattening (e.g., `server.database.host`)
+- **Comment Filtering**: Ignores lines starting with "#" or space in key-value files
 - **Excel Output**: Generates a comprehensive Excel report with matrix view and summary
 - **Multi-Server Support**: Handles multiple server types (APP, DB, WEB, etc.)
 
@@ -50,18 +54,24 @@ base_path/
 ├── APP/
 │   ├── hostname1/
 │   │   ├── application.conf
-│   │   ├── database.conf
-│   │   └── logging.conf
+│   │   ├── data_explorer/
+│   │   │   ├── settings.xml
+│   │   │   └── config.xml
+│   │   └── rc/
+│   │       └── startup.rc
 │   ├── hostname2/
 │   │   ├── application.conf
 │   │   ├── database.conf
-│   │   └── logging.conf
+│   │   └── site/
+│   │       └── web.xml
 │   └── hostname3/
 │       ├── application.conf
 │       └── database.conf
 ├── DB/
 │   ├── hostname1/
-│   │   └── postgres.conf
+│   │   ├── postgres.conf
+│   │   └── data_explorer/
+│   │       └── database.xml
 │   ├── hostname2/
 │   │   └── postgres.conf
 │   └── hostname3/
@@ -69,16 +79,19 @@ base_path/
 └── WEB/
     ├── hostname1/
     │   ├── nginx.conf
-    │   └── ssl.conf
+    │   ├── ssl.conf
+    │   └── rc/
+    │       └── server.rc
     └── hostname2/
         ├── nginx.conf
         └── ssl.conf
 ```
 
-## Input File Format
+## Input File Formats
 
-The tool expects configuration files with key-value pairs in this format:
+The tool supports multiple configuration file formats:
 
+### .conf and .rc Files (Key-Value Format)
 ```
 # This is a comment - will be ignored
  This line starts with space - will be ignored
@@ -89,6 +102,29 @@ database_port=5432
 application_name=MyApp
 timeout=30
 ```
+
+### .xml Files (XML Format)
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <database>
+        <host>apesap-h-koc-1</host>
+        <port>5432</port>
+        <ssl enabled="true">
+            <cert_path>/etc/ssl/certs/db.crt</cert_path>
+        </ssl>
+    </database>
+    <server host="apesap-h-web-1" port="8080"/>
+</configuration>
+```
+
+XML files are flattened using dot notation:
+- `database.host` = "apesap-h-koc-1"
+- `database.port` = "5432"  
+- `database.ssl.@enabled` = "true" (attributes use @)
+- `database.ssl.cert_path` = "/etc/ssl/certs/db.crt"
+- `server.@host` = "apesap-h-web-1"
+- `server.@port` = "8080"
 
 ## Output
 
@@ -130,9 +166,10 @@ For the folder structure above, the Excel matrix might look like:
 - Empty cells indicate the configuration is not present
 
 ### File Organization
-- Automatically discovers all `.conf` files in the hostname folders
-- Groups configurations by filename across all hostnames
-- Maintains source file tracking for easy identification
+- Automatically discovers all `.conf`, `.rc`, and `.xml` files in hostname folders and subdirectories
+- Searches up to 3 levels deep in subdirectories (e.g., `hostname/data_explorer/settings.xml`)
+- Groups configurations by relative file path across all hostnames
+- Maintains source file tracking with full path hierarchy for easy identification
 
 ### Excel Formatting
 - Auto-adjusts column widths for readability
