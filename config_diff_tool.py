@@ -15,11 +15,41 @@ from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import glob
 import os
+import xml.etree.ElementTree as ET
 
 
 def parse_config_file(file_path: str) -> Dict[str, str]:
     """
     Parse a configuration file and extract key-value pairs.
+    Supports .conf, .rc (key=value format) and .xml files.
+    
+    Args:
+        file_path: Path to the configuration file
+        
+    Returns:
+        Dictionary of key-value pairs
+    """
+    config_dict = {}
+    file_ext = os.path.splitext(file_path)[1].lower()
+    
+    try:
+        if file_ext == '.xml':
+            return parse_xml_file(file_path)
+        else:
+            # Handle .conf and .rc files (key=value format)
+            return parse_key_value_file(file_path)
+            
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        return {}
+    except Exception as e:
+        print(f"Error reading file '{file_path}': {e}")
+        return {}
+
+
+def parse_key_value_file(file_path: str) -> Dict[str, str]:
+    """
+    Parse a key=value format configuration file (.conf, .rc).
     
     Args:
         file_path: Path to the configuration file
@@ -29,29 +59,64 @@ def parse_config_file(file_path: str) -> Dict[str, str]:
     """
     config_dict = {}
     
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            for line_num, line in enumerate(file, 1):
-                line = line.strip()
+    with open(file_path, 'r', encoding='utf-8') as file:
+        for line_num, line in enumerate(file, 1):
+            line = line.strip()
+            
+            # Skip empty lines, lines starting with # or space
+            if not line or line.startswith('#') or line.startswith(' '):
+                continue
+            
+            # Split on first '=' character
+            if '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                config_dict[key] = value
                 
-                # Skip empty lines, lines starting with # or space
-                if not line or line.startswith('#') or line.startswith(' '):
-                    continue
-                
-                # Split on first '=' character
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    config_dict[key] = value
-                    
-    except FileNotFoundError:
-        print(f"Error: File '{file_path}' not found.")
-        return {}
-    except Exception as e:
-        print(f"Error reading file '{file_path}': {e}")
-        return {}
+    return config_dict
+
+
+def parse_xml_file(file_path: str) -> Dict[str, str]:
+    """
+    Parse an XML configuration file and extract key-value pairs.
+    Flattens XML structure using dot notation for nested elements.
+    
+    Args:
+        file_path: Path to the XML configuration file
         
+    Returns:
+        Dictionary of key-value pairs with dot notation for nested elements
+    """
+    config_dict = {}
+    
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        
+        def extract_elements(element, prefix=""):
+            # Handle element text content
+            if element.text and element.text.strip():
+                key = f"{prefix}{element.tag}" if prefix else element.tag
+                config_dict[key] = element.text.strip()
+            
+            # Handle element attributes
+            if element.attrib:
+                for attr_name, attr_value in element.attrib.items():
+                    key = f"{prefix}{element.tag}.@{attr_name}" if prefix else f"{element.tag}.@{attr_name}"
+                    config_dict[key] = attr_value
+            
+            # Handle child elements
+            for child in element:
+                child_prefix = f"{prefix}{element.tag}." if prefix else f"{element.tag}."
+                extract_elements(child, child_prefix)
+        
+        extract_elements(root)
+        
+    except ET.ParseError as e:
+        print(f"Error parsing XML file '{file_path}': {e}")
+        return {}
+    
     return config_dict
 
 
@@ -167,14 +232,19 @@ def analyze_hostname_differences(hostname_configs: Dict[str, Dict[str, str]]) ->
 def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
     """
     Find all configuration files in the hostname-based folder structure.
+    Supports .conf, .rc, and .xml files in both direct hostname folders
+    and subdirectories like data_explorer/, rc/, site/.
     
     Args:
         base_path: Base path containing server type folders
         
     Returns:
-        Dictionary mapping hostname to dict of {filename: filepath}
+        Dictionary mapping hostname to dict of {relative_path: filepath}
     """
     hostname_files = {}
+    
+    # Supported file extensions
+    supported_extensions = ['*.conf', '*.rc', '*.xml']
     
     # Look for folders in the pattern SERVER_TYPE/hostname
     pattern = os.path.join(base_path, "*", "*")
@@ -186,16 +256,29 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
             hostname = os.path.basename(folder_path)
             server_type = os.path.basename(os.path.dirname(folder_path))
             
-            # Find all .conf files in this hostname folder
-            conf_files = glob.glob(os.path.join(folder_path, "*.conf"))
+            # Find all supported config files in this hostname folder and subdirectories
+            config_files = []
             
-            if conf_files:
+            # Search in the hostname folder directly
+            for ext in supported_extensions:
+                config_files.extend(glob.glob(os.path.join(folder_path, ext)))
+            
+            # Search in common subdirectories (recursive search up to 3 levels deep)
+            for ext in supported_extensions:
+                config_files.extend(glob.glob(os.path.join(folder_path, "*", ext)))
+                config_files.extend(glob.glob(os.path.join(folder_path, "*", "*", ext)))
+                config_files.extend(glob.glob(os.path.join(folder_path, "*", "*", "*", ext)))
+            
+            if config_files:
                 if hostname not in hostname_files:
                     hostname_files[hostname] = {}
                 
-                for conf_file in conf_files:
-                    filename = os.path.basename(conf_file)
-                    hostname_files[hostname][filename] = conf_file
+                for config_file in config_files:
+                    # Create relative path from hostname folder to maintain hierarchy info
+                    rel_path = os.path.relpath(config_file, folder_path)
+                    # Replace path separators with forward slash for consistency
+                    rel_path = rel_path.replace(os.sep, '/')
+                    hostname_files[hostname][rel_path] = config_file
     
     return hostname_files
 
@@ -399,21 +482,29 @@ Expected folder structure:
     ├── APP/
     │   ├── hostname1/
     │   │   ├── config1.conf
-    │   │   └── config2.conf
+    │   │   ├── data_explorer/
+    │   │   │   └── settings.xml
+    │   │   └── rc/
+    │   │       └── startup.rc
     │   └── hostname2/
     │       ├── config1.conf
-    │       └── config2.conf
+    │       └── site/
+    │           └── web.xml
     └── DB/
         ├── hostname1/
-        │   └── db.conf
+        │   ├── db.conf
+        │   └── data_explorer/
+        │       └── database.xml
         └── hostname2/
             └── db.conf
 
 The tool will:
-- Parse key=value pairs from each .conf file
-- Ignore lines starting with # or space
+- Parse .conf, .rc (key=value format) and .xml files
+- Search in hostname directories and subdirectories (data_explorer/, rc/, site/, etc.)
+- For XML files: flatten structure using dot notation (e.g., server.database.host)
+- For .conf/.rc files: parse key=value pairs, ignore lines starting with # or space
 - Create a matrix with hostnames as columns and config keys as rows
-- Show filename in the leftmost column
+- Show relative file path in the leftmost column
         """
     )
     
@@ -438,7 +529,8 @@ The tool will:
     
     if not hostname_files:
         print("No configuration files found in the expected folder structure.")
-        print("Expected structure: SERVER_TYPE/hostname/*.conf")
+        print("Expected structure: SERVER_TYPE/hostname/*.{conf,rc,xml}")
+        print("Also searches subdirectories like data_explorer/, rc/, site/")
         sys.exit(1)
     
     print(f"Found configuration files for {len(hostname_files)} hostnames:")
