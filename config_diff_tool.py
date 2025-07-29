@@ -229,7 +229,7 @@ def analyze_hostname_differences(hostname_configs: Dict[str, Dict[str, str]]) ->
     return result
 
 
-def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
+def find_config_files(base_path: str) -> Dict[str, Dict[str, Dict[str, str]]]:
     """
     Find all configuration files in the hostname-based folder structure.
     Supports .conf, .rc, and .xml files in both direct hostname folders
@@ -239,9 +239,10 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
         base_path: Base path containing server type folders
         
     Returns:
-        Dictionary mapping hostname to dict of {relative_path: filepath}
+        Dictionary mapping server_type to hostname to dict of {relative_path: filepath}
+        Format: {server_type: {hostname: {relative_path: filepath}}}
     """
-    hostname_files = {}
+    server_hostname_files = {}
     
     # Supported file extensions
     supported_extensions = ['*.conf', '*.rc', '*.xml']
@@ -270,17 +271,19 @@ def find_config_files(base_path: str) -> Dict[str, Dict[str, str]]:
                 config_files.extend(glob.glob(os.path.join(folder_path, "*", "*", "*", ext)))
             
             if config_files:
-                if hostname not in hostname_files:
-                    hostname_files[hostname] = {}
+                if server_type not in server_hostname_files:
+                    server_hostname_files[server_type] = {}
+                if hostname not in server_hostname_files[server_type]:
+                    server_hostname_files[server_type][hostname] = {}
                 
                 for config_file in config_files:
                     # Create relative path from hostname folder to maintain hierarchy info
                     rel_path = os.path.relpath(config_file, folder_path)
                     # Replace path separators with forward slash for consistency
                     rel_path = rel_path.replace(os.sep, '/')
-                    hostname_files[hostname][rel_path] = config_file
+                    server_hostname_files[server_type][hostname][rel_path] = config_file
     
-    return hostname_files
+    return server_hostname_files
 
 
 def create_matrix_data(hostname_files: Dict[str, Dict[str, str]], enable_hostname_intelligence: bool = True) -> Tuple[pd.DataFrame, Dict[str, str]]:
@@ -357,7 +360,7 @@ def create_matrix_data(hostname_files: Dict[str, Dict[str, str]], enable_hostnam
     return pd.DataFrame(matrix_data), hostname_analysis
 
 
-def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_files: Dict[str, Dict[str, str]], hostname_analysis: Dict[str, str]):
+def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_files: Dict[str, Dict[str, str]], hostname_analysis: Dict[str, str], server_type: str = ""):
     """
     Write matrix data to an Excel file with proper formatting and hostname intelligence.
     
@@ -366,6 +369,7 @@ def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_fi
         output_path: Path for output Excel file
         hostname_files: Original hostname files mapping for summary
         hostname_analysis: Dictionary with hostname difference analysis
+        server_type: Server type for this matrix (for display purposes)
     """
     try:
         # Create Excel writer
@@ -467,6 +471,42 @@ def write_matrix_to_excel(matrix_df: pd.DataFrame, output_path: str, hostname_fi
         sys.exit(1)
 
 
+def process_server_type_matrix(server_type: str, hostname_files: Dict[str, Dict[str, str]], base_output_path: str, enable_hostname_intelligence: bool = True):
+    """
+    Process matrix data for a specific server type and write to its own Excel file.
+    
+    Args:
+        server_type: The server type (e.g., 'APP', 'DB', 'WEB')
+        hostname_files: Dictionary mapping hostname to {filename: filepath} for this server type
+        base_output_path: Base output path (without extension)
+        enable_hostname_intelligence: Whether to enable hostname intelligence analysis
+        
+    Returns:
+        Tuple of (matrix_df, hostname_analysis) for this server type
+    """
+    print(f"Processing {server_type} server type...")
+    
+    # Create matrix data for this server type
+    matrix_df, hostname_analysis = create_matrix_data(hostname_files, enable_hostname_intelligence)
+    
+    if matrix_df.empty:
+        print(f"  No configuration data found for {server_type} server type.")
+        return matrix_df, hostname_analysis
+    
+    # Generate output filename for this server type
+    base_name = os.path.splitext(base_output_path)[0]
+    extension = os.path.splitext(base_output_path)[1] or '.xlsx'
+    output_path = f"{base_name}_{server_type}_diff_matrix{extension}"
+    
+    # Write to Excel
+    write_matrix_to_excel(matrix_df, output_path, hostname_files, hostname_analysis, server_type)
+    
+    print(f"  Generated: {output_path}")
+    print(f"  Matrix contains {len(matrix_df)} configuration entries across {len(hostname_files)} hostnames")
+    
+    return matrix_df, hostname_analysis
+
+
 def main():
     """Main function to run the config matrix tool."""
     parser = argparse.ArgumentParser(
@@ -524,55 +564,84 @@ The tool will:
     print(f"Scanning for configuration files in: {args.base_path}")
     print()
     
-    # Find all config files organized by hostname
-    hostname_files = find_config_files(args.base_path)
+    # Find all config files organized by server type and hostname
+    server_hostname_files = find_config_files(args.base_path)
     
-    if not hostname_files:
+    if not server_hostname_files:
         print("No configuration files found in the expected folder structure.")
         print("Expected structure: SERVER_TYPE/hostname/*.{conf,rc,xml}")
         print("Also searches subdirectories like data_explorer/, rc/, site/")
         sys.exit(1)
     
-    print(f"Found configuration files for {len(hostname_files)} hostnames:")
-    for hostname, files in hostname_files.items():
-        print(f"  {hostname}: {len(files)} files")
+    print(f"Found configuration files for {len(server_hostname_files)} server types:")
+    total_hostnames = 0
+    total_files = 0
+    for server_type, hostname_files in server_hostname_files.items():
+        host_count = len(hostname_files)
+        file_count = sum(len(files) for files in hostname_files.values())
+        total_hostnames += host_count
+        total_files += file_count
+        print(f"  {server_type}: {host_count} hostnames, {file_count} total files")
     print()
     
-    # Create matrix data
+    # Process each server type separately
     enable_hostname_intelligence = not args.disable_hostname_intelligence
     if enable_hostname_intelligence:
-        print("Creating configuration matrix with hostname intelligence...")
+        print("Creating configuration matrices with hostname intelligence...")
     else:
-        print("Creating configuration matrix...")
-    matrix_df, hostname_analysis = create_matrix_data(hostname_files, enable_hostname_intelligence)
+        print("Creating configuration matrices...")
+    print()
     
-    if matrix_df.empty:
-        print("No configuration data found to process.")
-        sys.exit(1)
+    all_matrices = {}
+    all_analyses = {}
+    total_config_entries = 0
     
-    # Write to Excel
-    write_matrix_to_excel(matrix_df, args.output, hostname_files, hostname_analysis)
+    for server_type, hostname_files in server_hostname_files.items():
+        matrix_df, hostname_analysis = process_server_type_matrix(
+            server_type, hostname_files, args.output, enable_hostname_intelligence
+        )
+        all_matrices[server_type] = matrix_df
+        all_analyses[server_type] = hostname_analysis
+        total_config_entries += len(matrix_df)
     
-    # Print summary
-    print(f"\nProcessing Summary:")
-    print(f"  Hostnames processed: {len(hostname_files)}")
-    print(f"  Unique files found: {len(matrix_df['File'].unique())}")
-    print(f"  Total config entries: {len(matrix_df)}")
+    # Print overall summary
+    print(f"\nOverall Processing Summary:")
+    print(f"  Server types processed: {len(server_hostname_files)}")
+    print(f"  Total hostnames processed: {total_hostnames}")
+    print(f"  Total files found: {total_files}")
+    print(f"  Total config entries: {total_config_entries}")
     
-    # Print hostname intelligence summary
-    if hostname_analysis:
-        hostname_only_count = sum(1 for v in hostname_analysis.values() if v == 'Hostname-Only')
-        significant_count = sum(1 for v in hostname_analysis.values() if v == 'Significant')
-        same_count = sum(1 for v in hostname_analysis.values() if v == 'Same')
+    # Print hostname intelligence summary across all server types
+    if any(all_analyses.values()) and enable_hostname_intelligence:
+        total_hostname_only = 0
+        total_significant = 0
+        total_same = 0
         
-        print(f"\nHostname Intelligence Analysis:")
-        print(f"  Same across hostnames: {same_count}")
-        print(f"  Hostname-only differences: {hostname_only_count}")
-        print(f"  Significant differences: {significant_count}")
+        for server_type, hostname_analysis in all_analyses.items():
+            if hostname_analysis:
+                hostname_only_count = sum(1 for v in hostname_analysis.values() if v == 'Hostname-Only')
+                significant_count = sum(1 for v in hostname_analysis.values() if v == 'Significant')
+                same_count = sum(1 for v in hostname_analysis.values() if v == 'Same')
+                
+                total_hostname_only += hostname_only_count
+                total_significant += significant_count
+                total_same += same_count
         
-        if hostname_only_count > 0:
-            print(f"\nNote: {hostname_only_count} configuration entries differ only by hostname numbering.")
-            print("These are highlighted in yellow in the Excel output.")
+        print(f"\nOverall Hostname Intelligence Analysis:")
+        print(f"  Same across hostnames: {total_same}")
+        print(f"  Hostname-only differences: {total_hostname_only}")
+        print(f"  Significant differences: {total_significant}")
+        
+        if total_hostname_only > 0:
+            print(f"\nNote: {total_hostname_only} configuration entries differ only by hostname numbering.")
+            print("These are highlighted in yellow in the Excel outputs.")
+    
+    print(f"\nGenerated separate diff matrix files for each server type:")
+    base_name = os.path.splitext(args.output)[0]
+    extension = os.path.splitext(args.output)[1] or '.xlsx'
+    for server_type in server_hostname_files.keys():
+        output_file = f"{base_name}_{server_type}_diff_matrix{extension}"
+        print(f"  {output_file}")
 
 
 if __name__ == "__main__":
