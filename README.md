@@ -1,61 +1,57 @@
-# Server Python Version Checker
+# Server Python Audit Script
 
-This script checks Python versions, OSIPython versions, and Python executables in PATH on servers and saves the results to an XML file.
+A single, self-contained Python script that audits Python installations on servers and saves results to XML. Designed for deployment to multiple servers with git integration for centralized result collection.
 
 ## Features
 
-- Check local server or remote servers via SSH
-- Retrieves 4 pieces of information per server:
+- **Single Script**: No external dependencies, runs with standard Python 3
+- **Local Execution**: Runs locally on each server (no SSH complexity)
+- **Complete Audit**: Collects 4 key pieces of information per server:
   - Hostname
-  - Python Version (`python --version`)
+  - Python Version (`python --version` or `python3 --version`)
   - OSIPython Version (`osipython --version`)
   - Python executables found in PATH
-- Appends results to XML file (`Server_Python_Versions.xml` by default)
-- Supports both password and key-based SSH authentication
+- **XML Output**: Creates/updates XML file with audit results
+- **Git Integration**: Automatically commits results to git repository
+- **Smart Updates**: Updates existing entries for same hostname or adds new ones
 
 ## Installation
 
-1. Install required dependencies:
-```bash
-pip install -r requirements.txt
-```
+No installation required! The script uses only Python standard library modules.
 
 ## Usage
 
-### Check Local Server
+### Basic Usage
 ```bash
-python server_python_checker.py --local
+python3 server_python_audit.py
 ```
 
-### Check Remote Server with Password
+### Custom XML File
 ```bash
-python server_python_checker.py --host 192.168.1.100 --username myuser --password mypassword
+python3 server_python_audit.py --xml-file custom_audit.xml
 ```
 
-### Check Remote Server with SSH Key
+### With Git Integration
 ```bash
-python server_python_checker.py --host 192.168.1.100 --username myuser --key-file ~/.ssh/id_rsa
+python3 server_python_audit.py --git-commit
 ```
 
-### Custom XML Output File
+### With Git Commit and Push
 ```bash
-python server_python_checker.py --local --xml-file custom_output.xml
+python3 server_python_audit.py --git-commit --git-push
 ```
 
-### Custom SSH Port
+### Custom Commit Message
 ```bash
-python server_python_checker.py --host 192.168.1.100 --username myuser --password mypassword --port 2222
+python3 server_python_audit.py --git-commit --commit-message "Monthly Python audit"
 ```
 
 ## Command Line Arguments
 
-- `--local`: Check the local server
-- `--host`: Remote server hostname or IP address
-- `--username`: SSH username for remote servers
-- `--password`: SSH password for remote servers
-- `--key-file`: SSH private key file path for remote servers
-- `--port`: SSH port (default: 22)
 - `--xml-file`: Output XML file name (default: Server_Python_Versions.xml)
+- `--git-commit`: Commit changes to git repository
+- `--git-push`: Push changes to remote git repository (implies --git-commit)
+- `--commit-message`: Custom git commit message
 
 ## XML Output Format
 
@@ -84,21 +80,57 @@ The script handles various error conditions gracefully:
 
 Errors are recorded in the XML output for troubleshooting.
 
-## Examples
+## Deployment Workflow
 
-1. **Check multiple servers**: Run the script multiple times with different `--host` parameters to append data for multiple servers to the same XML file.
+### Recommended Git-Based Workflow
 
-2. **Batch processing**: Create a shell script to check multiple servers:
+1. **Setup**: Initialize a git repository in a shared location
+2. **Deploy**: Copy `server_python_audit.py` to each server
+3. **Execute**: Run the script on each server with `--git-commit`
+4. **Collect**: Pull changes from the git repository to see all results
+
 ```bash
-#!/bin/bash
-python server_python_checker.py --host server1.example.com --username admin --key-file ~/.ssh/id_rsa
-python server_python_checker.py --host server2.example.com --username admin --key-file ~/.ssh/id_rsa
-python server_python_checker.py --host server3.example.com --username admin --key-file ~/.ssh/id_rsa
+# On each server:
+python3 server_python_audit.py --git-commit
+
+# On management machine:
+git pull  # Get all server results
 ```
 
-## Notes
+### Alternative File-Based Workflow
 
-- The script appends data to the XML file, so you can run it multiple times to collect information from different servers
-- Each server entry includes a timestamp of when it was checked
-- The script automatically handles XML formatting and indentation
-- SSH host key verification is automatically accepted (uses `AutoAddPolicy`)
+1. **Deploy**: Copy script to servers
+2. **Execute**: Run script on each server
+3. **Collect**: Copy XML files back to central location
+
+```bash
+# On each server:
+python3 server_python_audit.py --xml-file $(hostname)_audit.xml
+
+# Copy files back for analysis
+```
+
+## Examples
+
+### Single Server Audit
+```bash
+python3 server_python_audit.py
+```
+
+### Production Deployment with Git
+```bash
+# Deploy to servers and run with git integration
+for server in server1 server2 server3; do
+    scp server_python_audit.py $server:~/
+    ssh $server "cd /path/to/git/repo && python3 ~/server_python_audit.py --git-commit"
+done
+
+# Collect results
+git pull
+```
+
+### Scheduled Audits
+```bash
+# Add to crontab for monthly audits
+0 0 1 * * cd /path/to/git/repo && python3 /path/to/server_python_audit.py --git-commit --git-push
+```
