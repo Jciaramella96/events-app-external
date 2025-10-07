@@ -1,0 +1,63 @@
+import os
+import csv
+import socket
+import subprocess
+from pathlib import Path
+
+def run_cmd(cmd):
+    """Run a shell command and return its stdout or stderr text."""
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return result.stdout.strip() or result.stderr.strip()
+
+def get_python_cmds_linux():
+    """Return all python commands on Linux using compgen."""
+    out = run_cmd("compgen -c python")
+    cmds = sorted(set(out.splitlines()))
+    return cmds
+
+def get_python_versions(cmds):
+    """Return [[hostname, command, version], ...]"""
+    hostname = socket.gethostname()
+    rows = []
+    for cmd in cmds:
+        version = run_cmd(f"{cmd} --version")
+        rows.append([hostname, cmd, version])
+    return rows
+
+def write_to_csv(rows, csv_path):
+    """Append rows to CSV file with header if missing."""
+    header = ["hostname", "python_command", "version"]
+    csv_path = Path(csv_path)
+    exists = csv_path.exists()
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(header)
+        writer.writerows(rows)
+
+def detect_os_and_run(csv_path="python_versions.csv"):
+    """Detect OS, run compgen on Linux, or skip otherwise."""
+    system = os.name  # 'posix' = Linux/macOS, 'nt' = Windows
+    hostname = socket.gethostname()
+
+    if system == "posix":
+        print(f"[+] Detected Linux on {hostname}")
+        cmds = get_python_cmds_linux()
+        if not cmds:
+            print("No python commands found.")
+            return
+        rows = get_python_versions(cmds)
+        write_to_csv(rows, csv_path)
+        print(f"[+] Wrote {len(rows)} python commands to {csv_path}")
+
+    elif system == "nt":
+        print(f"[+] Detected Windows on {hostname} — skipping compgen (not supported)")
+        # You could call your shutil-style fallback here if you want:
+        # rows = get_python_versions(find_python_binaries())
+        # write_to_csv(rows, csv_path)
+    else:
+        print(f"Unsupported OS: {system}")
+
+# Example usage
+if __name__ == "__main__":
+    detect_os_and_run("python_versions.csv")
