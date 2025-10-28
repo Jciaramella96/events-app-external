@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ServerPythonVersions generated="2025-09-16T18:49:43.854052">
+  <Server checked="2025-09-16T18:49:43.871649">
+    <Hostname>cursor</Hostname>
+    <PythonVersion>Python 3.13.3</PythonVersion>
+    <OSIPythonVersion>Error: /bin/sh: 1: osipython: not found</OSIPythonVersion>
+    <PythonsInPath>/usr/bin/python3; /usr/bin/python3.13</PythonsInPath>
+  </Server>
+</ServerPythonVersions>
