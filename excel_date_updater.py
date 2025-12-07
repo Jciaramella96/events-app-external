@@ -12,12 +12,14 @@ import shutil
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 NS = {"main": SPREADSHEET_NS, "rel": REL_NS}
 HEADER_ROW_INDEX = 1
+STYLES_PATH = "xl/styles.xml"
+TARGET_NUMBER_FORMAT = "ddmmyyyy hhmm AM/PM"
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,6 +85,68 @@ def load_shared_strings(zf: zipfile.ZipFile) -> List[str]:
         text_chunks = [node.text or "" for node in si.findall(".//main:t", NS)]
         strings.append("".join(text_chunks))
     return strings
+
+
+def load_styles(zf: zipfile.ZipFile) -> ET.Element:
+    try:
+        raw = zf.read(STYLES_PATH)
+    except KeyError as exc:
+        raise ValueError("Workbook is missing xl/styles.xml, cannot set formats") from exc
+    return ET.fromstring(raw)
+
+
+def _ensure_num_fmts(styles_root: ET.Element) -> ET.Element:
+    num_fmts = styles_root.find("main:numFmts", NS)
+    if num_fmts is None:
+        num_fmts = ET.Element(f"{{{SPREADSHEET_NS}}}numFmts", count="0")
+        styles_root.insert(0, num_fmts)
+    return num_fmts
+
+
+def ensure_num_fmt_id(styles_root: ET.Element, format_code: str) -> int:
+    num_fmts = _ensure_num_fmts(styles_root)
+    for num_fmt in num_fmts.findall("main:numFmt", NS):
+        if num_fmt.attrib.get("formatCode") == format_code:
+            return int(num_fmt.attrib["numFmtId"])
+    max_existing = 163
+    for num_fmt in num_fmts.findall("main:numFmt", NS):
+        max_existing = max(max_existing, int(num_fmt.attrib.get("numFmtId", "0")))
+    new_id = max_existing + 1
+    ET.SubElement(
+        num_fmts,
+        f"{{{SPREADSHEET_NS}}}numFmt",
+        numFmtId=str(new_id),
+        formatCode=format_code,
+    )
+    num_fmts.attrib["count"] = str(len(num_fmts.findall("main:numFmt", NS)))
+    return new_id
+
+
+def ensure_cell_xf_index(styles_root: ET.Element, num_fmt_id: int) -> int:
+    cell_xfs = styles_root.find("main:cellXfs", NS)
+    if cell_xfs is None:
+        raise ValueError("Workbook styles missing <cellXfs>, cannot define formats")
+    xfs = cell_xfs.findall("main:xf", NS)
+    for idx, xf in enumerate(xfs):
+        if xf.attrib.get("numFmtId") == str(num_fmt_id) and xf.attrib.get("applyNumberFormat") == "1":
+            return idx
+    base_attrs = xfs[0].attrib.copy() if xfs else {
+        "numFmtId": "0",
+        "fontId": "0",
+        "fillId": "0",
+        "borderId": "0",
+        "xfId": "0",
+    }
+    base_attrs["numFmtId"] = str(num_fmt_id)
+    base_attrs["applyNumberFormat"] = "1"
+    ET.SubElement(cell_xfs, f"{{{SPREADSHEET_NS}}}xf", base_attrs)
+    cell_xfs.attrib["count"] = str(len(cell_xfs.findall("main:xf", NS)))
+    return len(cell_xfs.findall("main:xf", NS)) - 1
+
+
+def ensure_date_style_index(styles_root: ET.Element) -> int:
+    num_fmt_id = ensure_num_fmt_id(styles_root, TARGET_NUMBER_FORMAT)
+    return ensure_cell_xf_index(styles_root, num_fmt_id)
 
 
 def resolve_sheet_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
@@ -188,7 +252,14 @@ def set_numeric_value(cell: ET.Element, value: int) -> None:
     v_elem.text = str(value)
 
 
-def update_dates(sheet_root: ET.Element, header_map: Dict[str, str], row_number: int, start_serial: int, end_serial: int) -> None:
+def update_dates(
+    sheet_root: ET.Element,
+    header_map: Dict[str, str],
+    row_number: int,
+    start_serial: int,
+    end_serial: int,
+    style_index: Optional[int],
+) -> None:
     row = find_or_create_row(sheet_root, row_number)
     start_col = header_map.get("target start date")
     end_col = header_map.get("target end date")
@@ -200,19 +271,37 @@ def update_dates(sheet_root: ET.Element, header_map: Dict[str, str], row_number:
     end_cell = find_or_create_cell(row, end_col, row_number)
     set_numeric_value(start_cell, start_serial)
     set_numeric_value(end_cell, end_serial)
+    if style_index is not None:
+        start_cell.attrib["s"] = str(style_index)
+        end_cell.attrib["s"] = str(style_index)
+    else:
+        start_cell.attrib.pop("s", None)
+        end_cell.attrib.pop("s", None)
 
 
-def write_updated_workbook(zf: zipfile.ZipFile, sheet_path: str, sheet_root: ET.Element, output_path: str) -> None:
+def serialize_xml(element: ET.Element) -> bytes:
+    buffer = io.BytesIO()
+    ET.ElementTree(element).write(buffer, encoding="utf-8", xml_declaration=True)
+    return buffer.getvalue()
+
+
+def write_updated_workbook(
+    zf: zipfile.ZipFile,
+    replacements: Dict[str, bytes],
+    output_path: str,
+) -> None:
     temp_fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
     os.close(temp_fd)
     try:
-        buffer = io.BytesIO()
-        ET.ElementTree(sheet_root).write(buffer, encoding="utf-8", xml_declaration=True)
-        updated_sheet = buffer.getvalue()
         with zipfile.ZipFile(temp_path, "w") as zout:
             for item in zf.infolist():
-                data = updated_sheet if item.filename == sheet_path else zf.read(item.filename)
+                data = replacements.pop(item.filename, None)
+                if data is None:
+                    data = zf.read(item.filename)
                 zout.writestr(item, data)
+        if replacements:
+            missing = ", ".join(replacements)
+            raise ValueError(f"Did not write replacements for: {missing}")
         shutil.move(temp_path, output_path)
     finally:
         if os.path.exists(temp_path):
@@ -238,11 +327,24 @@ def main() -> None:
 
     with zipfile.ZipFile(workbook_path, "r") as zf:
         shared_strings = load_shared_strings(zf)
+        styles_root = load_styles(zf)
+        date_style_idx = ensure_date_style_index(styles_root)
         sheet_path = resolve_sheet_path(zf, args.sheet)
         sheet_root = ET.fromstring(zf.read(sheet_path))
         header_map = build_header_map(sheet_root, shared_strings)
-        update_dates(sheet_root, header_map, args.row, start_serial, end_serial)
-        write_updated_workbook(zf, sheet_path, sheet_root, output_path)
+        update_dates(
+            sheet_root,
+            header_map,
+            args.row,
+            start_serial,
+            end_serial,
+            date_style_idx,
+        )
+        replacements = {
+            sheet_path: serialize_xml(sheet_root),
+            STYLES_PATH: serialize_xml(styles_root),
+        }
+        write_updated_workbook(zf, replacements, output_path)
 
     print(
         "Updated '{sheet}' row {row} in {dest}".format(
