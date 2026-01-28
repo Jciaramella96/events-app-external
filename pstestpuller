@@ -1,0 +1,80 @@
+##############################################
+# Azure DevOps – Get Test Results by Time Window
+# Works for Classic Release pipelines
+##############################################
+
+# ===== CONFIG =====
+$org     = "your-org"
+$project = "your-project"
+$pat     = "YOUR_PAT"
+
+# IMPORTANT: UTC timestamps
+$completedAfter  = "2026-01-26T18:00:00Z"
+$completedBefore = "2026-01-26T19:00:00Z"
+
+# Output file
+$outputCsv = "Release_TestResults.csv"
+
+
+# ===== AUTH HEADER =====
+$base64AuthInfo = [Convert]::ToBase64String(
+    [Text.Encoding]::ASCII.GetBytes(":$pat")
+)
+
+$headers = @{
+    Authorization = "Basic $base64AuthInfo"
+}
+
+
+# ===== QUERY TEST RUNS BY COMPLETION WINDOW =====
+$runsUrl = "https://dev.azure.com/$org/$project/_apis/test/runs" +
+           "?minLastUpdatedDate=$completedAfter" +
+           "&maxLastUpdatedDate=$completedBefore" +
+           "&api-version=7.0"
+
+Write-Host "Querying test runs..."
+$runsResponse = Invoke-RestMethod -Uri $runsUrl -Headers $headers -Method Get
+
+
+# ===== FILTER COMPLETED + AUTOMATED RUNS =====
+$completedRuns = $runsResponse.value | Where-Object {
+    $_.state -eq "Completed" -and
+    $_.isAutomated -eq $true
+}
+
+Write-Host "Found $($completedRuns.Count) completed automated test runs."
+
+
+# ===== PULL TEST RESULTS PER RUN =====
+$allResults = @()
+
+foreach ($run in $completedRuns) {
+
+    Write-Host "Processing RunId $($run.id) | $($run.name)"
+
+    $resultsUrl = "https://dev.azure.com/$org/$project/_apis/test/runs/$($run.id)/results?api-version=7.0"
+
+    $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Headers $headers -Method Get
+
+    foreach ($result in $resultsResponse.value) {
+        $allResults += [PSCustomObject]@{
+            RunId         = $run.id
+            RunName       = $run.name
+            CompletedDate = $run.completedDate
+            TestName      = $result.testCaseTitle
+            Outcome       = $result.outcome
+            DurationMs    = $result.durationInMs
+            ErrorMessage  = $result.errorMessage
+            StackTrace    = $result.stackTrace
+        }
+    }
+}
+
+
+# ===== EXPORT RESULTS =====
+if ($allResults.Count -gt 0) {
+    $allResults | Export-Csv $outputCsv -NoTypeInformation
+    Write-Host "Test results exported to $outputCsv"
+} else {
+    Write-Warning "No test results found in the specified time window."
+}
